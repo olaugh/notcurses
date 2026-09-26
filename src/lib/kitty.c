@@ -1166,10 +1166,107 @@ int kitty_scrub(const ncpile* p, sprixel* s){
   return 0;
 }
 
+// value of one base64 digit, or -1 for '=' padding / anything else.
+static inline int
+base64_digit(unsigned char c){
+  if(c >= 'A' && c <= 'Z'){
+    return c - 'A';
+  }else if(c >= 'a' && c <= 'z'){
+    return c - 'a' + 26;
+  }else if(c >= '0' && c <= '9'){
+    return c - '0' + 52;
+  }else if(c == '+'){
+    return 62;
+  }else if(c == '/'){
+    return 63;
+  }
+  return -1;
+}
+
+// MAGPIE: in NCPIXEL_KITTY_STATIC mode the glyph is kept as uncompressed,
+// chunked base64 RGBA so that wipes and rebuilds can edit it in place, and
+// it was emitted as-is: a 64x64 cell-sized graphic costs ~22KB on the wire,
+// every time it's (re)drawn. Decode the glyph's payload back to RGBA and emit
+// it deflated (o=z) instead, leaving the editable glyph untouched. Returns 0
+// on success, or -1 if the glyph isn't the expected single a=t transmission
+// (the caller then emits it verbatim).
+static int
+kitty_draw_static_deflated(const sprixel* s, fbuf* f){
+  const char* g = s->glyph.buf;
+  const size_t glen = s->glyph.used;
+  int lenx, leny, id;
+  if(sscanf(g, "\e_Gf=32,s=%d,v=%d,i=%d,p=1,a=t,", &lenx, &leny, &id) != 3
+     || lenx <= 0 || leny <= 0){
+    return -1;
+  }
+  const size_t rawlen = (size_t)lenx * leny * 4;
+  unsigned char* raw = malloc(rawlen);
+  if(raw == NULL){
+    return -1;
+  }
+  size_t rawused = 0;
+  size_t pos = 0;
+  unsigned quad = 0;
+  int qlen = 0;
+  // walk each "\e_G<keys>;<payload>\e\\" chunk, decoding its payload
+  while(pos + 3 < glen){
+    if(g[pos] != '\x1b' || g[pos + 1] != '_' || g[pos + 2] != 'G'){
+      free(raw);
+      return -1;
+    }
+    const char* semi = memchr(g + pos, ';', glen - pos);
+    if(semi == NULL){
+      free(raw);
+      return -1;
+    }
+    size_t i = semi - g + 1;
+    while(i < glen && g[i] != '\x1b'){
+      const int d = base64_digit((unsigned char)g[i++]);
+      if(d < 0){ // '=' padding ends the group early
+        continue;
+      }
+      quad = (quad << 6) | (unsigned)d;
+      if(++qlen == 4){
+        if(rawused + 3 > rawlen + 2){
+          free(raw);
+          return -1;
+        }
+        const unsigned char three[3] = { quad >> 16, (quad >> 8) & 0xff, quad & 0xff };
+        for(int b = 0 ; b < 3 && rawused < rawlen ; ++b){
+          raw[rawused++] = three[b];
+        }
+        quad = 0;
+        qlen = 0;
+      }
+    }
+    if(qlen >= 2){ // a padded final group: 2 digits -> 1 byte, 3 -> 2
+      quad <<= 6 * (4 - qlen);
+      const unsigned char three[3] = { quad >> 16, (quad >> 8) & 0xff, quad & 0xff };
+      for(int b = 0 ; b < qlen - 1 && rawused < rawlen ; ++b){
+        raw[rawused++] = three[b];
+      }
+      quad = 0;
+      qlen = 0;
+    }
+    pos = i + 2; // skip the ST
+  }
+  if(rawused != rawlen){
+    logwarn("static glyph %u decoded to %" PRIuPTR "B, expected %" PRIuPTR "B",
+            s->id, rawused, rawlen);
+    free(raw);
+    return -1;
+  }
+  int ret = -1;
+  if(fbuf_printf(f, "\e_Gf=32,s=%d,v=%d,i=%d,p=1,a=t,q=2", lenx, leny, id) >= 0){
+    ret = deflate_buf(raw, f, leny, lenx);
+  }
+  free(raw);
+  return ret;
+}
+
 // returns the number of bytes written
 int kitty_draw(const tinfo* ti, const ncpile* p, sprixel* s, fbuf* f,
                int yoff, int xoff){
-  (void)ti;
   (void)p;
   bool animated = false;
   if(s->animating){ // active animation
@@ -1179,7 +1276,18 @@ int kitty_draw(const tinfo* ti, const ncpile* p, sprixel* s, fbuf* f,
   int ret = s->glyph.used;
   logdebug("dumping %" PRIu64 "b for %u at %d %d", s->glyph.used, s->id, yoff, xoff);
   if(ret){
-    if(fbuf_putn(f, s->glyph.buf, s->glyph.used) < 0){
+    bool sent = false;
+    if(ti->pixel_implementation == NCPIXEL_KITTY_STATIC && !animated){
+      // try a deflated transmission; fall back to the glyph verbatim.
+      // bytes written stays the glyph size, which only feeds statistics.
+      const uint64_t before = f->used;
+      if(kitty_draw_static_deflated(s, f) == 0){
+        sent = true;
+      }else{
+        f->used = before;
+      }
+    }
+    if(!sent && fbuf_putn(f, s->glyph.buf, s->glyph.used) < 0){
       ret = -1;
     }
   }
