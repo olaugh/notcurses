@@ -501,10 +501,30 @@ send_initial_directives(queried_terminals_e qterm, int fd){
     free(pqueries);
   }
 #undef PQUERYBUFLEN
-  if(blocking_write(fd, DIRECTIVES, strlen(DIRECTIVES))){
+  // tmux takes an APC string as a window title, so under tmux the kitty
+  // graphics query would title the window "Gi=1,a=q;". tmux can't pass kitty
+  // graphics on without passthrough anyway: leave the query out.
+  const char* directives = DIRECTIVES;
+  char* trimmed = NULL;
+  const char* kq = KITTYQUERY;
+  const char* at = *kq && getenv("TMUX") ? strstr(directives, kq) : NULL;
+  if(at){
+    size_t pre = at - directives;
+    size_t len = strlen(directives) - strlen(kq);
+    if((trimmed = malloc(len + 1)) == NULL){
+      return -1;
+    }
+    memcpy(trimmed, directives, pre);
+    strcpy(trimmed + pre, at + strlen(kq));
+    directives = trimmed;
+  }
+  size_t dlen = strlen(directives);
+  int werr = blocking_write(fd, directives, dlen);
+  free(trimmed);
+  if(werr){
     return -1;
   }
-  total += strlen(DIRECTIVES);
+  total += dlen;
   return total;
 }
 
