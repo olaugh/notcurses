@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -1835,7 +1836,7 @@ build_cflow_automaton(inputctx* ictx){
     { "[?1;2S", NULL, }, // negative cregs XTSMGRAPHICS
     { "[?1;3S", NULL, }, // negative cregs XTSMGRAPHICS
     { "[?1;3;S", NULL, }, // iterm2 negative cregs XTSMGRAPHICS
-    { "[?1;3;0S", NULL, }, // negative cregs XTSMGRAPHICS
+    { "[?1;3;\\NS", NULL, }, // negative cregs XTSMGRAPHICS (tmux: "?1;3;256S")
     { "[?2;1S", NULL, }, // negative pixels XTSMGRAPHICS
     { "[?2;2S", NULL, }, // negative pixels XTSMGRAPHICS
     { "[?2;3S", NULL, }, // negative pixels XTSMGRAPHICS
@@ -1845,6 +1846,10 @@ build_cflow_automaton(inputctx* ictx){
     { "[?7c", da1_cb, },   // CSI ? 7 c ("VT131")
     { "[?1;0c", da1_cb, }, // CSI ? 1 ; 0 c ("VT101 with No Options")
     { "[?1;2c", da1_cb, }, // CSI ? 1 ; 2 c ("VT100 with Advanced Video Option")
+    // VT100 with Advanced Video Option plus attributes, as tmux answers
+    // ("?1;2;4c" when it can pass Sixel through). Without this, the fixed
+    // "[?1;" prefixes above capture the reply and "[?\N;\Dc" never sees it.
+    { "[?1;2;\\Dc", da1_attrs_cb, },
     { "[?4;6c", da1_cb, }, // CSI ? 4 ; 6 c ("VT132 with Advanced Video and Graphics")
     // CSI ? 1 2 ; Ps c ("VT125")
     // CSI ? 6 0 ; Ps c (kmscon)
@@ -2918,11 +2923,35 @@ int notcurses_linesigs_enable(notcurses* n){
   return linesigs_enable(&n->tcache);
 }
 
+// how long to wait for the terminal to answer the startup queries before
+// carrying on with whatever arrived. A reply the automaton can't parse would
+// otherwise hang startup forever (tmux's DA1 once did exactly that).
+#define INITIAL_RESPONSE_TIMEOUT_S 3
+
 struct initial_responses* inputlayer_get_responses(inputctx* ictx){
   struct initial_responses* iresp;
+  struct timespec deadline;
+  // icond runs on CLOCK_MONOTONIC where pthread_condmonotonic_init() can
+  // arrange it, and on CLOCK_REALTIME on macOS and Windows.
+#if defined(__APPLE__) || defined(__MINGW32__)
+  clock_gettime(CLOCK_REALTIME, &deadline);
+#else
+  clock_gettime(CLOCK_MONOTONIC, &deadline);
+#endif
+  deadline.tv_sec += INITIAL_RESPONSE_TIMEOUT_S;
   pthread_mutex_lock(&ictx->ilock);
   while(ictx->initdata || !ictx->initdata_complete){
-    pthread_cond_wait(&ictx->icond, &ictx->ilock);
+    if(pthread_cond_timedwait(&ictx->icond, &ictx->ilock, &deadline) == ETIMEDOUT){
+      if(ictx->initdata || !ictx->initdata_complete){
+        logwarn("no complete reply to the terminal queries after %ds; continuing",
+                INITIAL_RESPONSE_TIMEOUT_S);
+        if(!ictx->initdata_complete){
+          ictx->initdata_complete = ictx->initdata;
+        }
+        ictx->initdata = NULL;
+      }
+      break;
+    }
   }
   iresp = ictx->initdata_complete;
   ictx->initdata_complete = NULL;
