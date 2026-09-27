@@ -1005,6 +1005,17 @@ apply_term_heuristics(tinfo* ti, const char* tname, queried_terminals_e qterm,
       break;
     case TERMINAL_TMUX:
       newname = "tmux"; // FIXME what, oh what to do with tmux?
+      // tmux advertises Sixel whenever it was built with it, but it can only
+      // hand images on to an outer terminal that shows Sixel; otherwise it
+      // draws a "SIXEL IMAGE" placeholder where each image should be. Don't
+      // use Sixel under tmux unless NOTCURSES_TMUX_SIXEL says the outer
+      // terminal can.
+      if(!getenv("NOTCURSES_TMUX_SIXEL")){
+        ti->color_registers = 0;
+        ti->sixel_maxx = 0;
+        ti->sixel_maxy = 0;
+        ti->sixel_maxy_pristine = 0;
+      }
       break;
     case TERMINAL_GNUSCREEN:
       newname = apply_gnuscreen_heuristics(ti);
