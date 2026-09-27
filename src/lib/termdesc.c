@@ -506,7 +506,8 @@ send_initial_directives(queried_terminals_e qterm, int fd){
   // graphics on without passthrough anyway: leave the query out.
   const char* directives = DIRECTIVES;
   char* trimmed = NULL;
-  const char* kq = KITTYQUERY;
+  // KITTYQUERY is empty on Windows, where the query isn't sent.
+  const char* kq = "" KITTYQUERY;
   const char* at = *kq && getenv("TMUX") ? strstr(directives, kq) : NULL;
   if(at){
     size_t pre = at - directives;
