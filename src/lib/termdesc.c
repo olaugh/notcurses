@@ -1293,8 +1293,14 @@ handle_responses(tinfo* ti, size_t* tablelen, size_t* tableused,
   if(iresp->got_fg){
     ti->fg_default = iresp->fg;
   }
-  // kitty trumps sixel, when both are available
-  if((*kitty_graphics = iresp->kitty_graphics) == 0){
+  // kitty trumps sixel, when both are available -- except on iTerm2, which
+  // answers the kitty graphics query but leaves most placements undrawn
+  // (3.6: of a board of tiles, one appeared), while its Sixel works.
+  *kitty_graphics = iresp->kitty_graphics;
+  if(iresp->qterm == TERMINAL_ITERM && iresp->color_registers > 0){
+    *kitty_graphics = 0;
+  }
+  if(*kitty_graphics == 0){
     if((ti->color_registers = iresp->color_registers) > SIXEL_MAX_REGISTERS){
       ti->color_registers = SIXEL_MAX_REGISTERS;
     }
